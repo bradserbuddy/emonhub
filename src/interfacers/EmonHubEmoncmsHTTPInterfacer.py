@@ -4,6 +4,8 @@ import time
 import json
 import urllib2
 import httplib
+
+from persistent_queue import PersistentQueue
 from pydispatch import dispatcher
 from emonhub_interfacer import EmonHubInterfacer
 
@@ -25,8 +27,9 @@ class EmonHubEmoncmsHTTPInterfacer(EmonHubInterfacer):
             'sendstatus': 0,
             'sendinterval': 30
         }
-        
+
         self.buffer = []
+        self.queue = PersistentQueue("queuefile")
         self.lastsent = time.time()
         self.lastsentstatus = time.time()
 
@@ -51,15 +54,29 @@ class EmonHubEmoncmsHTTPInterfacer(EmonHubInterfacer):
     def action(self):
     
         now = time.time()
-        
-        if (now-self.lastsent) > (int(self._settings['sendinterval'])):
+
+        si = int(self._settings['sendinterval'])
+
+        if (now-self.lastsent) > si:
             self.lastsent = now
             # print json.dumps(self.buffer)
             if int(self._settings['senddata']):
-                self.bulkpost(self.buffer)
-            self.buffer = []
-            
-        if (now-self.lastsentstatus)> (int(self._settings['sendinterval'])):
+
+                while self.queue.count() > 0 and time.time() - now < si - 5:  # 5 seconds of 'breathing room' between calls to action()
+                    databuffer = self.queue.peek()
+
+                    if self.bulkpost(databuffer):
+                        self.queue.delete()
+                        self.queue.flush()
+                    else:
+                        time.sleep(1)  # if we continue to encounter failures
+
+                if not self.bulkpost(self.buffer):
+                    self.queue.push([self.buffer])  # write buffer as a single object
+
+                self.buffer = []
+
+        if (now-self.lastsentstatus) > si:
             self.lastsentstatus = now
             if int(self._settings['sendstatus']):
                 self.sendstatus()
